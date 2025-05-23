@@ -3,9 +3,10 @@ use crate::ratatui::layout::Rect;
 use crate::ratatui::text::{Span, Text};
 use crate::ratatui::widgets::{Paragraph, Widget};
 use crate::textarea::TextArea;
-use crate::util::num_digits;
+use crate::util::{line_rows, num_digits};
 #[cfg(feature = "ratatui")]
 use ratatui::text::Line;
+use ratatui::widgets::Wrap;
 use std::cmp;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "tuirs")]
@@ -137,14 +138,80 @@ impl Widget for &TextArea<'_> {
         };
 
         let (top_row, top_col) = self.viewport.scroll_top();
-        let top_row = self.scroll_top_row(top_row, height);
-        let top_col = self.scroll_top_col(top_col, width);
+        let mut top_row = self.scroll_top_row(top_row, height);
+        let mut top_col = self.scroll_top_col(top_col, width);
+
+        let cursor = self.cursor();
+        let wrap = self.get_wrap();
+        if wrap {
+            let wrapped_rows =
+                wrapped_rows(&self.lines(), width, self.line_number_style().is_some());
+            top_row = next_scroll_row_wrapped(top_row, cursor.0 as u16, height, &wrapped_rows);
+            // Column for scoll should never change with wrapping (no horiz scroll)
+            // FIXME: Edge case where line can't fit in screen and overflows?
+        } else {
+            top_row = next_scroll_top(top_row, cursor.0 as u16, height);
+            top_col = next_scroll_top(top_col, cursor.1 as u16, width);
+        }
+        let (top_row, top_col) = (top_row, top_col);
+
+        // Transform lines into array of row count for each line
+        fn wrapped_rows(lines: &[String], wrap_width: u16, has_lnum: bool) -> Vec<u16> {
+            let num_lines = lines.len();
+            lines
+                .iter()
+                .map(|line| line_rows(&line, wrap_width, has_lnum, num_lines))
+                .collect()
+        }
 
         let (text, style) = if !self.placeholder.is_empty() && self.is_empty() {
             (self.placeholder_widget(), self.placeholder_style)
         } else {
             (self.text_widget(top_row as _, height as _), self.style())
         };
+        fn next_scroll_row_wrapped(
+            prev_top_row: u16,
+            cursor_row: u16,
+            viewport_height: u16,
+            wrapped_rows: &Vec<u16>,
+        ) -> u16 {
+            if cursor_row < prev_top_row {
+                return cursor_row;
+            } else {
+                // Calculate the number of wrap rows between the top row and the cursor row
+                // TODO: Clarify why +1 is needed
+                let rows_from_top_to_cursor = wrapped_rows
+                    [prev_top_row as usize..cursor_row as usize]
+                    .iter()
+                    .sum::<u16>()
+                    + 1;
+                let cursor_row_wraps = wrapped_rows[cursor_row as usize] - 1;
+                let cursor_line_on_screen =
+                    rows_from_top_to_cursor + cursor_row_wraps <= viewport_height;
+                let rows_to_move =
+                    (rows_from_top_to_cursor + cursor_row_wraps).saturating_sub(viewport_height);
+
+                if !cursor_line_on_screen {
+                    // Count how many lines add up to enough rows to get entire cursor line on screen again
+                    let lines_to_move = wrapped_rows[prev_top_row as usize..cursor_row as usize]
+                        .iter()
+                        .scan(0, |acc, &row| {
+                            // Sum wrap rows to this line
+                            *acc += row;
+                            Some(*acc)
+                        })
+                        // Return index of line where acc exceeds rows_to_move
+                        .position(|sum| sum >= rows_to_move)
+                        .unwrap_or(0) as u16;
+                    let lines_to_move = lines_to_move + 1; // Convert from index
+
+                    // Never move below cursor row in case terminal can't fit it
+                    return (prev_top_row + lines_to_move).min(cursor_row);
+                } else {
+                    return prev_top_row;
+                }
+            };
+        }
 
         // To get fine control over the text color and the surrrounding block they have to be rendered separately
         // see https://github.com/ratatui/ratatui/issues/144
@@ -152,6 +219,9 @@ impl Widget for &TextArea<'_> {
         let mut inner = Paragraph::new(text)
             .style(style)
             .alignment(self.alignment());
+        if wrap {
+            inner = inner.wrap(Wrap { trim: false });
+        }
         if let Some(b) = self.block() {
             text_area = b.inner(area);
             // ratatui does not need `clone()` call because `Block` implements `WidgetRef` and `&T` implements `Widget`
@@ -163,6 +233,7 @@ impl Widget for &TextArea<'_> {
         if top_col != 0 {
             inner = inner.scroll((0, top_col));
         }
+        // TODO: Vertical scroll to position top edge in middle of wrapped line
 
         // Store scroll top position for rendering on the next tick
         self.viewport.store(top_row, top_col, width, height);

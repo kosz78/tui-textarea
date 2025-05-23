@@ -107,6 +107,7 @@ impl fmt::Display for YankText {
 pub struct TextArea<'a> {
     lines: Vec<String>,
     block: Option<Block<'a>>,
+    wrap: bool,
     style: Style,
     cursor: (usize, usize), // 0-base
     tab_len: u8,
@@ -212,6 +213,7 @@ impl<'a> TextArea<'a> {
         Self {
             lines,
             block: None,
+            wrap: false,
             style: Style::default(),
             cursor: (0, 0),
             tab_len: 4,
@@ -1671,6 +1673,16 @@ impl<'a> TextArea<'a> {
     /// Get the current style of textarea.
     pub fn style(&self) -> Style {
         self.style
+    }
+
+    /// Get current wrap setting of textarea.
+    pub fn get_wrap(&self) -> bool {
+        self.wrap
+    }
+
+    /// Set text wrapping. By default, wrap is false.
+    pub fn set_wrap(&mut self, wrap: bool) {
+        self.wrap = wrap
     }
 
     /// Set the block of textarea. By default, no block is set.
